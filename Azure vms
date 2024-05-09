@@ -1,0 +1,118 @@
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 2.57"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+resource "azurerm_resource_group" "RGsql-rg" {
+  name     = "RGSql"
+  location = "East US"
+}
+
+resource "azurerm_virtual_network" "vnet" {
+  name                = "myVNet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.RGsql-rg.location
+  resource_group_name = azurerm_resource_group.RGsql-rg.name
+}
+
+resource "azurerm_subnet" "subnet" {
+  name                 = "mySubnet"
+  resource_group_name  = azurerm_resource_group.RGsql-rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
+
+resource "azurerm_network_security_group" "RGsql-sg" {
+  name                = "RGsql-sg"
+  location            = azurerm_resource_group.RGsql-rg.location
+  resource_group_name = azurerm_resource_group.RGsql-rg.name
+
+  security_rule {
+    name                       = "RSG-dev-rule"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  tags = {
+    environment = "dev"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "RSG-sga" {
+  subnet_id                 = azurerm_subnet.subnet.id
+  network_security_group_id = azurerm_network_security_group.RGsql-sg.id
+}
+
+resource "azurerm_public_ip" "public_ip" {
+  count               = 4
+  name                = "myPublicIP-${count.index}"
+  location            = azurerm_resource_group.RGsql-rg.location
+  resource_group_name = azurerm_resource_group.RGsql-rg.name
+  allocation_method   = "Static"  # Changed from Dynamic to Static
+}
+
+resource "azurerm_network_interface" "nic" {
+  count               = 4
+  name                = "myNIC-${count.index}"
+  location            = azurerm_resource_group.RGsql-rg.location
+  resource_group_name = azurerm_resource_group.RGsql-rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Static"  # Changed from Dynamic to Static
+    public_ip_address_id          = azurerm_public_ip.public_ip[count.index].id
+  }
+}
+
+resource "azurerm_windows_virtual_machine" "vm" {
+  count                 = 4
+  name                  = count.index == 0 ? "SQLAD" : format("SQL%02d", count.index)
+  resource_group_name   = azurerm_resource_group.RGsql-rg.name
+  location              = azurerm_resource_group.RGsql-rg.location
+  size                  = "Standard_DS1_v2"
+  network_interface_ids = [azurerm_network_interface.nic[count.index].id]
+  admin_username        = "Billy"
+  admin_password        = "123456@Admin"
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+    disk_size_gb         = 127
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+}
+
+output "vm_public_ips" {
+  value       = { for i, ip in azurerm_public_ip.public_ip : "${i == 0 ? "SQLAD" : format("SQL%02d", i)}" => ip.ip_address }
+  description = "The public IP addresses of the virtual machines"
+}
+
+output "vm_private_ips" {
+  value       = { for i, nic in azurerm_network_interface.nic : "${i == 0 ? "SQLAD" : format("SQL%02d", i)}" => nic.ip_configuration[0].private_ip_address }
+  description = "The private IP addresses of the virtual machines"
+}
